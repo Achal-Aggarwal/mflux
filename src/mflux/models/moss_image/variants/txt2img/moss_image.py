@@ -27,12 +27,18 @@ class MOSSImage(nn.Module):
     DEFAULT_GUIDANCE = 3.0
     # The negative CFG branch skips this zero-based transformer layer.
     DEFAULT_UNCOND_SKIP_LAYERS = (22,)
+    # LoRAs stay separate layers. Most of the update of the step-distilled LoRAs is smaller than half
+    # a bfloat16 step of the weights it lands on, so a merge into the weights loses half of it.
+    DEFAULT_BAKE_LORA = False
 
     def __init__(
         self,
         quantize: int | None = None,
         model_path: str | None = None,
         model_config: ModelConfig | None = None,
+        lora_paths: list[str] | None = None,
+        lora_scales: list[float] | None = None,
+        bake_lora: bool = DEFAULT_BAKE_LORA,
     ):
         super().__init__()
         MOSSImageInitializer.init(
@@ -40,7 +46,11 @@ class MOSSImage(nn.Module):
             model_config=model_config or ModelConfig.moss_image_sft(),
             quantize=quantize,
             model_path=model_path,
+            lora_paths=lora_paths,
+            lora_scales=lora_scales,
+            bake_lora=bake_lora,
         )
+        self.bake_lora = bake_lora
 
     def generate_image(
         self,
@@ -105,6 +115,8 @@ class MOSSImage(nn.Module):
                 **step_cache.generation_parameters(step_cache_ratio),
                 # The layer skip changes the image, so the metadata records it for --config-from-metadata.
                 "uncond_skip_layers": sorted(skip_layers),
+                # Merged and runtime LoRAs give different images, so a LoRA run records which one it used.
+                **({"bake_lora": self.bake_lora} if self.lora_paths else {}),
             },
         )
 
