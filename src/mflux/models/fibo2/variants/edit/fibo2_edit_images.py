@@ -11,6 +11,8 @@ class Fibo2EditImages:
     MAX_IMAGES = 5
     AREA = 1024 * 1024
     MULTIPLE = 16
+    # The transformer has 512 RoPE positions for rows and for columns, 16 pixels each
+    MAX_SIDE = 512 * 16
     TEXT_ENCODER_IMAGE_SIZE = 768
 
     @staticmethod
@@ -32,10 +34,10 @@ class Fibo2EditImages:
                 raise ValueError(f"The mask has size {mask.size} but the image has size {images[0].size}.")
             images = [Fibo2EditImages.grey_out(images[0], mask)]
         first = images[0]
-        if width is None and height is None:
-            width, height = Fibo2EditImages.trained_size(first.width / first.height)
+        width, height = Fibo2EditImages._result_size(first.width / first.height, width, height)
+        Fibo2EditImages._check_side(width, height)
         # Rounded down to a multiple of 16, as the generated latents are
-        width, height = 16 * ((width or 1024) // 16), 16 * ((height or 1024) // 16)
+        width, height = 16 * (width // 16), 16 * (height // 16)
         if len(images) == 1:
             sizes = [(width, height)]
         else:
@@ -64,6 +66,34 @@ class Fibo2EditImages:
             for size in sizes
         ]
         return min(ranked)[3]
+
+    @staticmethod
+    def result_size(image_path: Path | str, width: int | None, height: int | None) -> tuple[int, int]:
+        # The size an edit of this image comes out at, checked against MAX_SIDE, without decoding the image
+        with Image.open(image_path) as image:
+            size = Fibo2EditImages._result_size(image.width / image.height, width, height)
+        Fibo2EditImages._check_side(*size)
+        return size
+
+    @staticmethod
+    def _check_side(width: int, height: int) -> None:
+        if max(width, height) > Fibo2EditImages.MAX_SIDE:
+            raise ValueError(
+                f"FIBO 2 makes images up to {Fibo2EditImages.MAX_SIDE} pixels a side, this edit would be {width}x{height}. "
+                "Pass both --width and --height, or a smaller one."
+            )
+
+    @staticmethod
+    def _result_size(aspect_ratio: float, width: int | None, height: int | None) -> tuple[int, int]:
+        # Without width and height, the trained size for the first image's aspect ratio. With one, the other keeps it,
+        # and is at least 16 so that it does not round down to nothing.
+        if width is not None and height is not None:
+            return width, height
+        if width is not None:
+            return width, max(Fibo2EditImages.MULTIPLE, round(width / aspect_ratio))
+        if height is not None:
+            return max(Fibo2EditImages.MULTIPLE, round(height * aspect_ratio)), height
+        return Fibo2EditImages.trained_size(aspect_ratio)
 
     @staticmethod
     def grey_out(image: Image.Image, mask: Image.Image) -> Image.Image:
