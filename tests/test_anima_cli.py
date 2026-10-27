@@ -1,4 +1,5 @@
 import copy
+import json
 import sys
 import warnings
 
@@ -18,6 +19,7 @@ from mflux.models.common.resolution.config_resolution import ConfigResolution
 class _StubAnima:
     # Records what the CLI hands the model instead of loading the weights.
     instances: list = []
+    DEFAULT_GUIDANCE = Anima.DEFAULT_GUIDANCE
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -173,3 +175,86 @@ class TestAnimaResolution:
     def test_the_card_defaults(self):
         assert Anima.DEFAULT_GUIDANCE == {"anima-turbo": 1.0, "anima-aesthetic": 4.0, "anima-base": 4.0}
         assert {key: ui_defaults.MODEL_INFERENCE_STEPS[key] for key in Anima.DEFAULT_STEPS} == Anima.DEFAULT_STEPS
+
+
+@pytest.mark.fast
+class TestAnimaReplay:
+    @pytest.mark.parametrize(("recorded", "expected"), [({"sampler": "euler"}, "euler"), ({}, "er_sde")])
+    def test_a_sidecar_replays_its_sampler(self, run_cli, tmp_path, recorded, expected):
+        # --make-conf records the sampler; a sidecar from 0.24.0 has none and runs the default
+        sidecar = tmp_path / "image.metadata.json"
+        sidecar.write_text(json.dumps({"prompt": "1girl", "seed": 1, **recorded}))
+        model, _ = run_cli("-C", str(sidecar))
+        assert model.generated[0]["scheduler"] == expected
+
+    def test_the_flag_overrides_the_sidecar_sampler(self, run_cli, tmp_path):
+        sidecar = tmp_path / "image.metadata.json"
+        sidecar.write_text(json.dumps({"prompt": "1girl", "seed": 1, "sampler": "euler"}))
+        model, _ = run_cli("-C", str(sidecar), "--scheduler", "er_sde")
+        assert model.generated[0]["scheduler"] == "er_sde"
+
+
+@pytest.mark.fast
+class TestAnimaReplayGuards:
+    def test_a_sidecar_sampler_outside_anima_names_is_refused_by_the_parser(self, run_cli, tmp_path):
+        # A dotted name would otherwise reach the scheduler lookup, which imports it
+        sidecar = tmp_path / "image.metadata.json"
+        sidecar.write_text(json.dumps({"prompt": "1girl", "seed": 1, "sampler": "os.path.join"}))
+        with pytest.raises(SystemExit):
+            run_cli("-C", str(sidecar))
+        assert _StubAnima.instances == []
+
+    def test_a_weight_that_is_not_finite_fails_before_the_model_loads(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["mflux-generate-anima", "--prompt", "(cat:nan)", "--seed", "1"])
+        monkeypatch.setattr(anima_generate, "Anima", _StubAnima)
+        _StubAnima.instances.clear()
+        with pytest.raises(ValueError, match="not a finite number"):
+            anima_generate.main()
+        assert _StubAnima.instances == []
+
+    def test_a_negative_prompt_weight_that_is_not_finite_fails_before_the_model_loads(self, monkeypatch):
+        argv = [
+            "mflux-generate-anima",
+            "--prompt",
+            "cat",
+            "--negative-prompt",
+            "(x:nan)",
+            "--guidance",
+            "4",
+            "--seed",
+            "1",
+        ]
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.setattr(anima_generate, "Anima", _StubAnima)
+        _StubAnima.instances.clear()
+        with pytest.raises(ValueError, match="not a finite number"):
+            anima_generate.main()
+        assert _StubAnima.instances == []
+
+    def test_a_negative_prompt_is_not_checked_at_guidance_1(self, monkeypatch):
+        argv = ["mflux-generate-anima", "--prompt", "cat", "--negative-prompt", "(x:nan)", "--seed", "1"]
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.setattr(anima_generate, "Anima", _StubAnima)
+        _StubAnima.instances.clear()
+        anima_generate.AnimaCommand.validate(anima_generate.build_parser().parse_args())
+
+    @pytest.mark.parametrize("flag", ["--prompt", "--negative-prompt"])
+    def test_a_weight_out_of_range_fails_before_the_model_loads(self, monkeypatch, flag):
+        other = [] if flag == "--prompt" else ["--prompt", "cat", "--guidance", "4"]
+        argv = ["mflux-generate-anima", "--seed", "1", flag, "(cat:1e39)", *other]
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.setattr(anima_generate, "Anima", _StubAnima)
+        _StubAnima.instances.clear()
+        with pytest.raises(ValueError, match="float32 range"):
+            anima_generate.main()
+        assert _StubAnima.instances == []
+
+    def test_a_prompt_file_is_checked_before_the_model_loads(self, monkeypatch, tmp_path):
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_text("(cat:nan)")
+        monkeypatch.setattr(sys, "argv", ["mflux-generate-anima", "--prompt-file", str(prompt_file), "--seed", "1"])
+        monkeypatch.setattr(anima_generate, "Anima", _StubAnima)
+        _StubAnima.instances.clear()
+        with pytest.raises(ValueError, match="not a finite number"):
+            anima_generate.main()
+        assert _StubAnima.instances == []
